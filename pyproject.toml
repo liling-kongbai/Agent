@@ -1,0 +1,20 @@
+[project]
+name = "mcphost"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.12.15",
+    "langchain>=0.3.27",
+    "langchain-deepseek>=0.1.4",
+    "langchain-mcp-adapters>=0.1.9",
+    "langchain-ollama>=0.3.6",
+    "langgraph>=0.5.4",
+    "langgraph-checkpoint-sqlite>=2.0.11",
+    "mcp>=1.12.2",
+    "numpy>=2.3.2",
+    "pyside6>=6.9.1",
+    "qasync>=0.27.1",
+    "sounddevice>=0.5.2",
+]
