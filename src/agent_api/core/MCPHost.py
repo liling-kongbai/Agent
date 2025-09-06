@@ -18,8 +18,11 @@ from langchain_deepseek import ChatDeepSeek
 from langchain_core.messages.human import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
+from langmem import create_memory_store_manager, ReflectionExecutor
+
 from .Config import Config
-from .State import AgentState
+from .state import State
+from .graph.episode_memory import EpisodeMemory
 from .tts import GPT_SoVITS_TTS
 
 from ..utils import logger
@@ -32,6 +35,7 @@ class MCPHost(QObject):
     occur_error = Signal(str) # 报错
     ai_message_chunk = Signal(str) # AI Message Chunk
     ai_message_chunk_finish = Signal() # AI Message Chunk 结束
+    graph_state = Signal(str) # 图状态
     input_ready = Signal() # 输入准备，后端准备就绪
     input_unready = Signal()  # 输入未准备，后端未准备就绪
     graph_ready = Signal() # 图准备，图准备就绪
@@ -62,6 +66,8 @@ class MCPHost(QObject):
         self._tool_node = None # 工具调用节点
         self._db_connection = None
         self._async_sqlite_saver = None # 异步 SQLite 文件检查点保存器
+        self._episode_memory_manager = None
+        self._episode_memory_reflection_executor = None
         self._graph = None
         self._current_thread_id = None
         self._run_config = None
@@ -72,7 +78,9 @@ class MCPHost(QObject):
             [
                 (
                     'system',
-                    '主人的名字叫：{user_name} --- 自己的名字叫：{ai_name} --- {incantation} --- 请使用{chat_language}进行对话'
+                    # '主人的名字叫：{user_name} --- 自己的名字叫：{ai_name} --- {incantation} --- 请使用{chat_language}进行对话'
+                    '用户的名字叫：{user_name} --- 自己的名字叫：{ai_name} --- {incantation} --- 请使用{chat_language}进行对话'
+
                 ),
                 MessagesPlaceholder(variable_name='messages')
             ]
@@ -167,11 +175,8 @@ class MCPHost(QObject):
 
     async def _init_graph_structure(self, mcp_tools):
         '''初始图结构'''
-        self._graph_builder = StateGraph(AgentState)
-        if mcp_tools:
-            self._tool_node = ToolNode(mcp_tools)
-        else:
-            self._tool_node = ToolNode(mcp_tools)
+        self._graph_builder = StateGraph(State)
+        self._tool_node = ToolNode(mcp_tools)
         self._graph_builder.add_node('chat_node', self._chat_node)
         self._graph_builder.add_node('tool_node', self._tool_node)
         self._graph_builder.add_edge(START, 'chat_node')
@@ -208,16 +213,19 @@ class MCPHost(QObject):
         )
         ai_message = None
         async for chunk in self._llm_with_tools.astream(chat_messages):
+            chunk_content = chunk.content
             if ai_message is None:
-                self.ai_message_chunk.emit(chunk.content)
-                if self._gpt_sovits:
-                    await self._gpt_sovits.put_text(chunk.content) # 这里可能有问题，因为 TTS 没写流式，不一定能成功
-                ai_message = chunk
+                if chunk_content:
+                    self.ai_message_chunk.emit(chunk_content)
+                    if self._gpt_sovits:
+                        await self._gpt_sovits.put_text(chunk_content) # 这里可能有问题，因为 TTS 没写流式，不一定能成功
+                    ai_message = chunk
             else:
-                self.ai_message_chunk.emit(chunk.content)
-                if self._gpt_sovits:
-                    await self._gpt_sovits.put_text(chunk.content) # 这里可能有问题，因为 TTS 没写流式，不一定能成功
-                ai_message += chunk
+                if chunk_content:
+                    self.ai_message_chunk.emit(chunk_content)
+                    if self._gpt_sovits:
+                        await self._gpt_sovits.put_text(chunk_content) # 这里可能有问题，因为 TTS 没写流式，不一定能成功
+                    ai_message += chunk
         self.ai_message_chunk_finish.emit()
         return {'messages': [ai_message]}
 
@@ -262,6 +270,7 @@ class MCPHost(QObject):
         await self._activate_gpt_sovits(False)
         await self._activate_mcp_client(False)
         await self._activate_llm('', '')
+
 
         if self._db_connection:
             logger.debug('_clean --- 清理图，清理异步 SQLite 文件检查点保存器，关闭并清理数据库')
@@ -309,6 +318,16 @@ class MCPHost(QObject):
             asyncio.run_coroutine_threadsafe(self._activate_llm(platform, model), self._event_loop)
     async def _activate_llm(self, platform, model):
         '''激活 LLM'''
+
+
+
+        if self._episode_memory_manager or self._episode_memory_reflection_executor:
+            await self._episode_memory_reflection_executor.shutdown()
+            self._episode_memory_manager = None
+            self._episode_memory_reflection_executor = None
+
+
+
         # 清理
         if not platform or not model:
             logger.debug('_activate_llm --- 停止和清理 LLM')
@@ -332,6 +351,22 @@ class MCPHost(QObject):
             await self._update_mcp_tools()
             self._llm_activated = True
             await self._check_emit()
+
+
+
+            if self._llm:
+                self._episodic_memory_manager = create_memory_store_manager(
+                    self._llm,
+                    schemas=[EpisodeMemory],
+                    store=self._async_sqlite_saver,
+                    namespace=('episodes', '{thread_id}')
+                )
+                self._episodic_memory_reflection_executor = ReflectionExecutor(
+                    self._episodic_memory_manager
+                )
+
+
+
             self._last_llm_platform = platform
             self._last_llm = model
         except Exception as e:
@@ -356,8 +391,8 @@ class MCPHost(QObject):
                     'test': {
                         'transport': 'stdio',
                         'command': 'uv',
-                        'args': ['run', r'C:\Users\kongbai\study\project\Agent\MCP\MCPSever\MCPServer.py'],
-                        'cwd': r'C:\Users\kongbai\study\project\Agent\MCP\MCPSever'
+                        'args': ['run', r'C:\Users\kongbai\study\project\AgentDevelop\MCPSever\src\mcp_server_app\MCPServer.py'],
+                        'cwd': r'C:\Users\kongbai\study\project\AgentDevelop\MCPSever'
                     }
                 }
             )
@@ -409,8 +444,31 @@ class MCPHost(QObject):
                 'system_prompt': self._config.state['system_prompt'],
                 'chat_language': self._config.state['chat_language']
             }
+
+            step_message = '--------------------Step--------------------\n'
             async for event in self._graph.astream(current_state, self._run_config):
-                logger.debug(event)
+                for node, node_state in event.items():
+                    step_message += f'Node: {node}\n'
+                    for i in node_state['messages']:
+                        step_message += f"Node_State: {type(i).__name__}({i!r})\n" # ！！！！！！！！！！！！！！！！
+                    self.graph_state.emit(step_message)
+                    logger.debug(step_message)
+
+
+
+            if self._episode_memory_reflection_executor:
+                final_state = await self._graph.aget_state(self._run_config)
+                final_message = final_state.values.get('messages', [])
+                if final_message:
+                    delay_seconds = 5 * 60
+                    self._episode_memory_reflection_executor.submit(
+                        {'messages': final_message},
+                        config=self._run_config,
+                        key=self._current_thread_id,
+                        after_seconds=delay_seconds
+                    )
+
+
 
             if is_new_chat:
                 time = datetime.now()
@@ -441,6 +499,7 @@ class MCPHost(QObject):
             logger.debug('更新 MCP 工具')
             if self._mcp_tools:
                 logger.debug('更新 MCP 工具')
+                print(self._mcp_tools)
                 self._llm_with_tools = self._llm.bind_tools(self._mcp_tools)
             else:
                 logger.warning('无 MCP 工具')

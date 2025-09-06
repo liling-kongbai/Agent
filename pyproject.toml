@@ -12,9 +12,20 @@ dependencies = [
     "langchain-ollama>=0.3.6",
     "langgraph>=0.5.4",
     "langgraph-checkpoint-sqlite>=2.0.11",
+    "langmem>=0.0.28",
     "mcp>=1.12.2",
     "numpy>=2.3.2",
     "pyside6>=6.9.1",
     "qasync>=0.27.1",
     "sounddevice>=0.5.2",
 ]
+
+[tool.black]
+line-length = 119
+skip-string-normalization = true
+skip-magic-trailing-comma = true
+
+[tool.isort]
+profile = "black"
+known_first_party = ["agent_api"]
+line_length = 119

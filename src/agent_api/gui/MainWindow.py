@@ -92,7 +92,7 @@ class MainWindow(QWidget):
         self.mcp_host.input_unready.connect(self.backend_unready)
         self.mcp_host.ai_message_chunk.connect(self.add_ai_message_bubble)
         self.mcp_host.ai_message_chunk_finish.connect(self.ai_message_chunk_finish)
-
+        self.mcp_host.graph_state.connect(self.panel.add_graph_state)
 
 
 
@@ -286,10 +286,12 @@ class MainWindow(QWidget):
     @Slot()
     def new_chat(self):
         self.main_content.clear_chat_bubbles()
+        self.panel.clear_state_log()
         self.mcp_host.new_chat()
 
 
     @Slot(str)
     def load_selected_chat_history(self, thread_id):
         self.main_content.set_input_text_edit_enabled_and_focus(False)
+        self.panel.clear_state_log()
         self.mcp_host.load_chat(thread_id)
