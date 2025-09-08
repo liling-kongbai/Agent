@@ -8,6 +8,7 @@ from . import (
     IntrospectionClassification,
     MainState,
     ReActState,
+    add_final_response_node,
     intent_classifier_node,
     introspection_entry_node,
     introspection_node,
@@ -21,6 +22,9 @@ async def create_react_graph(chat_node, llm, tools):
 
     react_graph_builder.add_node('chat_node', partial(chat_node, llm=llm))  # partial() 固定函数的部分参数，返回偏函数
     tool_node = ToolNode(tools)
+
+    # ！！！！！需要考虑 tools 为空的情况，可能需要写一个判断或分支路线
+
     react_graph_builder.add_node('tool_node', tool_node)
 
     react_graph_builder.add_edge(START, 'chat_node')
@@ -51,9 +55,13 @@ async def create_main_graph_builder(llm, chat_node, tools):
     main_graph_builder.add_conditional_edges(
         introspection_entry_node,
         introspection_node,
-        {IntrospectionClassification.RealIntentClassifierNode: 'real_intent_classifier_node', '__end__': END},
+        {
+            IntrospectionClassification.RealIntentClassifierNode: 'real_intent_classifier_node',
+            IntrospectionClassification.AddFinalResponse: 'add_final_response',
+        },
     )
     return main_graph_builder
 
 
-# ！！！！！ 考虑意图分类提示词是否需要更改，是否需要添加错误处理或重新处理的判断，或再次处理的判断
+# ！！！！！考虑意图分类提示词是否需要更改，是否需要添加错误处理或重新处理的判断，或再次处理的判断
+# ！！！！！如果有多个分支，当反思认为草稿无法完成任务时，然后转移到意图分类，那么此时，草稿中的内容应该清空还是传递给意图分支的图

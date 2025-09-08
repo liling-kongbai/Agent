@@ -38,7 +38,7 @@ async def create_introspection_chain(llm: BaseChatModel) -> RunnableSequence:
     prompt_template = ChatMessagePromptTemplate.from_template(
         '''
             阅读最新的几条消息，分析用户的意图和要求，结合回复内容，请判断回复内容是否能满足用户的意图和要求，根据情况返回以下选项之一：<<<{introspection_classification}>>>
-            如果回复内容能满足用户的意图和要求，请返回<<<{IntrospectionClassification_End}>>>;
+            如果回复内容能满足用户的意图和要求，请返回<<<{IntrospectionClassification_AddFinalResponseNode}>>>;
             如果回复内容能不能满足用户的意图和要求，请返回<<<{IntrospectionClassification_RealIntentClassifierNode}>>>;
             {format_instruction}
             消息：<<<{messages}>>>
@@ -46,7 +46,7 @@ async def create_introspection_chain(llm: BaseChatModel) -> RunnableSequence:
         ''',
         partial_variables={
             'introspection_classification': ', '.join([e for e in IntrospectionClassification]),
-            'IntrospectionClassification_End': IntrospectionClassification.End,
+            'IntrospectionClassification_AddFinalResponseNode': IntrospectionClassification.AddFinalResponseNode,
             'IntrospectionClassification_RealIntentClassifierNode': IntrospectionClassification.RealIntentClassifierNode,
             'format_instruction': parser.get_format_instructions(),
         },

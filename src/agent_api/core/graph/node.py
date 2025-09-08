@@ -63,7 +63,7 @@ async def react_graph_adapter_node(state, chat_node: chat_node, llm: BaseChatMod
 
 async def introspection_entry_node(state) -> dict:
     '''空节点，反思入口'''
-    return state
+    return {}
 
 
 async def introspection_node(state, llm: BaseChatModel) -> IntrospectionClassification:
@@ -72,7 +72,13 @@ async def introspection_node(state, llm: BaseChatModel) -> IntrospectionClassifi
         chain = create_introspection_chain(llm)
         return await chain.ainvoke({'message': state.messages, 'response_draft': state.response_draft})
     except:
-        IntrospectionClassification.End
+        IntrospectionClassification.AddFinalResponseNode
+
+
+async def add_final_response_node(state) -> dict:
+    '''添加最终回复。将回复草稿中的内容添加到 MainState 的 messages 中'''
+    final_response = state.get('response_draft')
+    return {'messages': [final_response]}
 
 
 # ！！！！！ 四种记忆相关的功能需要考虑是否能够分离为节点，需要严格讨论
