@@ -1,1 +1,1 @@
-from GPT_SoVITS_TTS import GPT_SoVITS_TTS
+from .GPT_SoVITS_TTS import GPT_SoVITS_TTS

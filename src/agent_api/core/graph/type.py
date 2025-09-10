@@ -18,11 +18,11 @@ class Intent(BaseModel):
 class IntrospectionClassification(str, Enum):
     '''枚举，反思类别'''
 
-    RealIntentClassifierNode = 'real_intent_classifier_node'
+    IntentClassifierEntryNode = 'intent_classifier_entry_node'
     AddFinalResponseNode = 'add_final_response_node'
 
 
 class Introspection(BaseModel):
     '''数据模型，反思'''
 
-    Introspection: IntrospectionClassification
+    introspection: IntrospectionClassification

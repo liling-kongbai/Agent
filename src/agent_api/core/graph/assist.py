@@ -2,12 +2,12 @@ import os
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.output_parsers.pydantic import PydanticOutputParser
-from langchain_core.prompts import ChatMessagePromptTemplate
+from langchain_core.prompts import ChatMessagePromptTemplate, ChatPromptTemplate
 from langchain_core.runnables.base import RunnableSequence
 from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import ChatOllama
 
-from . import Intent, IntentClassification, Introspection, IntrospectionClassification
+from .type import Intent, IntentClassification, Introspection, IntrospectionClassification
 
 
 async def create_intent_classifier_chain(llm: BaseChatModel) -> RunnableSequence:
@@ -15,7 +15,7 @@ async def create_intent_classifier_chain(llm: BaseChatModel) -> RunnableSequence
     parser = PydanticOutputParser(
         pydantic_object=Intent
     )  # PydanticOutputParser() 将 LLM 的非结构化输出解析为结构化的 Pydantic 对象
-    prompt_template = ChatMessagePromptTemplate.from_template(
+    message_prompt_template = ChatMessagePromptTemplate.from_template(
         '''
             <<<{messages}>>>
             分析所有消息，尤其是用户的最新消息，然后将用户接下来的意图分为以下之一：<<<{intent_classification}>>>
@@ -25,21 +25,23 @@ async def create_intent_classifier_chain(llm: BaseChatModel) -> RunnableSequence
             'intent_classification': ', '.join([e for e in IntentClassification]),
             'format_instruction': parser.get_format_instructions(),
         },
+        role='system',
     )  # get_format_instructions() 生成系统提示词，指导 LLM 按照指定的 Pydantic 对象输出 JSON 数据
 
     # ！！！！！ 注意输出可能是 JSON 数据，可能需要提取为 str
 
+    prompt_template = ChatPromptTemplate.from_messages([message_prompt_template])
     return prompt_template | llm | parser
 
 
 async def create_introspection_chain(llm: BaseChatModel) -> RunnableSequence:
     '''辅助，创建反思链'''
     parser = PydanticOutputParser(pydantic_object=Introspection)
-    prompt_template = ChatMessagePromptTemplate.from_template(
+    message_prompt_template = ChatMessagePromptTemplate.from_template(
         '''
             阅读最新的几条消息，分析用户的意图和要求，结合回复内容，请判断回复内容是否能满足用户的意图和要求，根据情况返回以下选项之一：<<<{introspection_classification}>>>
             如果回复内容能满足用户的意图和要求，请返回<<<{IntrospectionClassification_AddFinalResponseNode}>>>;
-            如果回复内容能不能满足用户的意图和要求，请返回<<<{IntrospectionClassification_RealIntentClassifierNode}>>>;
+            如果回复内容能不能满足用户的意图和要求，请返回<<<{IntrospectionClassification_IntentClassifierEntryNode}>>>;
             {format_instruction}
             消息：<<<{messages}>>>
             回复内容：<<<{response_draft}>>>
@@ -47,10 +49,12 @@ async def create_introspection_chain(llm: BaseChatModel) -> RunnableSequence:
         partial_variables={
             'introspection_classification': ', '.join([e for e in IntrospectionClassification]),
             'IntrospectionClassification_AddFinalResponseNode': IntrospectionClassification.AddFinalResponseNode,
-            'IntrospectionClassification_RealIntentClassifierNode': IntrospectionClassification.RealIntentClassifierNode,
+            'IntrospectionClassification_IntentClassifierEntryNode': IntrospectionClassification.IntentClassifierEntryNode,
             'format_instruction': parser.get_format_instructions(),
         },
+        role='system',
     )
+    prompt_template = ChatPromptTemplate.from_messages([message_prompt_template])
     return prompt_template | llm | parser
 
 

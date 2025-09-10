@@ -3,17 +3,16 @@ from functools import partial
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from . import (
-    IntentClassification,
-    IntrospectionClassification,
-    MainState,
-    ReActState,
+from .node import (
     add_final_response_node,
+    intent_classifier_entry_node,
     intent_classifier_node,
     introspection_entry_node,
     introspection_node,
     react_graph_adapter_node,
 )
+from .state import MainState, ReActState
+from .type import IntentClassification, IntrospectionClassification
 
 
 async def create_react_graph(chat_node, llm, tools):
@@ -40,26 +39,30 @@ async def create_main_graph_builder(llm, chat_node, tools):
     '''创建主图构建器，分层路由结构 + 反思。连接：意图分类节点，ReAct 图适配器节点，反思入口节点'''
     main_graph_builder = StateGraph(MainState)
 
-    real_intent_classifier_node = partial(intent_classifier_node, llm=llm)
+    main_graph_builder.add_node('intent_classifier_entry_node', intent_classifier_entry_node)
     main_graph_builder.add_node(
-        'react_graph_adapter_node', partial(react_graph_adapter_node, chat_node=chat_node, llm=llm, tools=tools)
+        'react_graph_adapter_node',
+        partial(react_graph_adapter_node, react_graph=await create_react_graph(chat_node, llm, tools)),
     )
     main_graph_builder.add_node('introspection_entry_node', introspection_entry_node)
+    main_graph_builder.add_node('add_final_response_node', add_final_response_node)
 
+    main_graph_builder.add_edge(START, 'intent_classifier_entry_node')
     main_graph_builder.add_conditional_edges(
-        START, real_intent_classifier_node, {IntentClassification.REACT_GRAPH: 'react_graph_adapter_node'}
+        'intent_classifier_entry_node',
+        partial(intent_classifier_node, llm=llm),
+        {IntentClassification.REACT_GRAPH: 'react_graph_adapter_node'},
     )
-
     main_graph_builder.add_edge('react_graph_adapter_node', 'introspection_entry_node')
-
     main_graph_builder.add_conditional_edges(
-        introspection_entry_node,
-        introspection_node,
+        'introspection_entry_node',
+        partial(introspection_node, llm=llm),
         {
-            IntrospectionClassification.RealIntentClassifierNode: 'real_intent_classifier_node',
-            IntrospectionClassification.AddFinalResponse: 'add_final_response',
+            IntrospectionClassification.IntentClassifierEntryNode: 'intent_classifier_entry_node',
+            IntrospectionClassification.AddFinalResponseNode: 'add_final_response_node',
         },
     )
+    main_graph_builder.add_edge('add_final_response_node', END)
     return main_graph_builder
 
 

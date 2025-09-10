@@ -1,13 +1,19 @@
-import datetime
 import traceback
+from datetime import datetime
 
 import aiosqlite
 from langchain_core.messages.human import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from ..utils import logger
-from . import GPT_SoVITS_TTS, chat_node, connect_deepseek_llm, connect_ollama_llm, create_main_graph_builder
+from ..utils import create_logger
+
+logger = create_logger(is_use_file_handler=True, log_path='agent.log')
+
+from .graph import create_main_graph_builder
+from .graph.assist import connect_deepseek_llm, connect_ollama_llm
+from .graph.node import chat_node
+from .tts import GPT_SoVITS_TTS
 
 
 class Agent:
@@ -76,7 +82,7 @@ class Agent:
             await self._compile_graph()
         except:
             error = traceback.format_exc()
-            self._broadcast('occur_error_emit', '<init_graph>\n' + error)
+            await self._broadcast('occur_error_monitor', '<init_graph>\n' + error)
             logger.error('<init_graph>\n' + error)
 
     async def _compile_graph(self):
@@ -87,7 +93,7 @@ class Agent:
             self._graph = graph_builder.compile(checkpointer=self.async_sqlite_saver)
 
             self._graph_ready = True
-            self._broadcast('graph_ready_emit')
+            await self._broadcast('graph_ready_monitor')
 
             # ！！！！！ 图准备信号好像没有什么用处了？
 
@@ -95,12 +101,50 @@ class Agent:
         else:
             logger.error('<_compile_graph> 异步 SQLite 文件检查点保存器不存在，未编译图！！！')
 
+    # ---------- 关闭 ----------
+    async def clean(self):
+        '''清理。执行所有必要的异步清理操作'''
+        logger.debug('<_clean> 清理')
+
+        if self._gpt_sovits:
+            logger.info('<cleanup> [诊断] 准备停止 GPT_SoVITS...')
+            await self._gpt_sovits.stop()
+            self._gpt_sovits = None
+            logger.info('<cleanup> [诊断] GPT_SoVITS 已停止。')
+
+        if self._mcp_tools:
+            self._mcp_tools = []
+            if self._multi_server_mcp_client:
+                logger.info('<cleanup> [诊断] 准备关闭 MCP 客户端...')
+                self._multi_server_mcp_client = None
+                logger.info('<cleanup> [诊断] MCP 客户端已关闭。')
+
+        if self._llm_activated:
+            self._llm_activated = False
+            await self._broadcast('input_unready_monitor')
+
+            self._llm_with_tools = None
+            self._llm = None
+
+        if self._graph_ready:
+            logger.debug('<_clean> 清理图，清理异步 SQLite 文件检查点保存器，关闭并清理数据库')
+            if self.async_sqlite_saver:
+                self.graph = None
+                logger.debug('<cleanup> 清理异步 SQLite 文件检查点保存器')
+                self.async_sqlite_saver = None
+                if self.db_connection:
+                    logger.info('<cleanup> [诊断] 准备关闭数据库连接...')
+                    await self.db_connection.close()
+                    self.db_connection = None
+                    logger.info('<cleanup> [诊断] 数据库连接已关闭。')
+        logger.debug('<cleanup> Agent 资源清理完毕')
+
     # ---------- 激活 LLM ----------
     async def activate_llm(self, platform, model):
         '''激活 LLM。连接 LLM'''
         if self._llm_activated:
             self._llm_activated = False
-            self._broadcast('input_unready_emit')
+            await self._broadcast('input_unready_monitor')
 
         self._llm_with_tools = None
         self._llm = None
@@ -121,7 +165,7 @@ class Agent:
                 self._last_llm = model
         except:
             error = traceback.format_exc()
-            self._broadcast('activate_llm_emit', '<activate_llm>\n' + error)
+            await self._broadcast('occur_error_monitor', '<activate_llm>\n' + error)
             logger.debug('<activate_llm>\n' + error)
 
     # ---------- 激活 MCP 客户端 ----------
@@ -167,12 +211,15 @@ class Agent:
     # ---------- 运行 ----------
     async def user_message_input(self, input, callbacks):
         '''User Message 输入。User Message 输入，运行图'''
-        self._broadcast('input_unready_emit')
+        await self._broadcast('input_unready_monitor')
 
         self._run_config = {'configurable': {'thread_id': self.current_thread_id}}
+
         try:
             state = await self._graph.aget_state(self._run_config)
+
             is_new_chat = not state.values.get('messages', [])
+
             messages = state.values.get('messages', []) + [HumanMessage(input)]
             current_state = {
                 'messages': messages,
@@ -180,29 +227,28 @@ class Agent:
                 'user_name': self._config.state['user_name'],
                 'ai_name': self._config.state['ai_name'],
                 'chat_language': self._config.state['chat_language'],
+                'response_draft': None,
             }
 
-            # ！！！！！这里好像有问题，因为 MainState 还有一个状态 response_draft，如果不提供，可能会报错
-
-            step_message = '--------------------Step--------------------\n'
-            async for event in self._graph.astream(current_state, self._run_config, ['updates']):
-                for step, step_state in event.items():
-                    if step == 'add_final_response_node':
-                        final_response_content = step_state['add_final_response_node'].content
-                        await callbacks['on_ai_message_chunk'](final_response_content)
+            async for event in self._graph.astream(current_state, self._run_config, stream_mode='updates'):
+                for node_name, node_output in event.items():
+                    if node_name == 'add_final_response_node':
+                        final_content = node_output['messages'][0].content
+                        await callbacks['on_ai_message_chunk'](final_content)
                         await callbacks['on_ai_message_chunk_finish']()
-
-                        # ！！！！！这里有问题，目前无法确定 step_state 的结构
-
                     else:
-                        step_message += f'Step: {step}\n'
-                        for i in step_state['messages']:
-                            step_message += f'Step_State: {type(i).__name__}({i!r})\n'
+                        node_message = f'-------------------- {node_name} --------------------\n'
+                        if node_output is not None:
+                            node_message = node_output.get('messages', [])
+                            for i in node_output:
+                                node_message += f'{type(i).__name__}({i!r})\n'
 
                             # ！！！！！这句话记得弄懂
 
-                        await callbacks['on_graph_state_update'](step_message)
-                        logger.debug(step_message)
+                        else:
+                            node_message = node_message + '---------- None ----------'
+                        await callbacks['on_graph_state_update'](node_message)
+                        logger.debug(node_message)
 
             # 对话历史相关
             if is_new_chat:  # 新对话
@@ -215,7 +261,7 @@ class Agent:
                 # ！！！！！这里注意占位符有些用处，注意学习
 
                 await self.db_connection.commit()
-                await self._update_chat_history_list()
+                await self.update_chat_history_list()
             else:  # 旧对话
                 await self.db_connection.execute(
                     'UPDATE ChatHistory SET updated_at = ? WHERE thread_id = ?',
@@ -228,8 +274,10 @@ class Agent:
 
         except:
             error = traceback.format_exc()
-            self._broadcast('occur_error_emit', '<user_message_input>' + error)
-            logger.debug('<user_message_input>' + error)
+            await self._broadcast('occur_error_monitor', '<user_message_input>\n' + error)
+            logger.debug('<user_message_input>\n' + error)
+        finally:
+            await self._broadcast('input_ready_monitor')
 
     # ---------- 对话历史 ----------
     async def update_chat_history_list(self):
@@ -242,7 +290,7 @@ class Agent:
             )  # fetchall() 把查询得到的所有剩余行一次性取回来并返回列表，列表里每个元素是一条 row （行
             # 从 ChatHistory 表中取出所有 thread_id，title，updated_at，根据 update_at 按照降序排列
             history_list = [{'thread_id': row[0], 'title': row[1]} for row in rows]
-            self._broadcast('update_history_list_emit', history_list)
+            await self._broadcast('update_chat_history_list_signal_monitor', history_list)
 
     async def load_chat(self, thread_id):
         '''加载会话'''
@@ -259,11 +307,11 @@ class Agent:
                 is_user = isinstance(m, HumanMessage)
                 history.append({'text': m.content, 'is_user': is_user})
 
-            self._broadcast('load_chat', history)
-            self._broadcast('input_ready')
+            await self._broadcast('load_chat_signal_monitor', history)
+            await self._broadcast('input_ready_monitor')
         except:
             error = traceback.format_exc()
-            self._broadcast('occur_error_emit', '<load_chat>' + error)
+            await self._broadcast('occur_error_monitor', '<load_chat>' + error)
             logger.debug('<load_chat>' + error)
 
     # ---------- 辅助 ----------
@@ -271,7 +319,7 @@ class Agent:
         '''输入准备检查。检查图是否准备，LLM 是否激活，并广播输入准备信号'''
         logger.debug('<_input_ready_check> 输入准备检查')
         if self._graph_ready and self._llm_activated:
-            self._broadcast('input_ready_emit')
+            await self._broadcast('input_ready_monitor')
 
     async def _update_tools_bind(self):
         '''更新工具绑定。'''
@@ -282,17 +330,17 @@ class Agent:
                 self._llm_with_tools = self._llm
         else:
             self._llm_with_tools = self._llm
-        await self._compile_graph(self._llm_with_tools, chat_node, self._mcp_tools)
+        await self._compile_graph()
 
     # ---------- 监听与广播 ----------
-    async def add_listener(self, listener):
+    def add_listener(self, listener):
         '''添加监听者'''
         if listener and listener not in self._listeners:
             self._listeners.append(listener)
 
     # ！！！！！添加谁进来？还没有添加！
 
-    async def remove_listener(self, listener):
+    def remove_listener(self, listener):
         '''移除监听者'''
         if listener and listener in self._listeners:
             self._listeners.remove(listener)

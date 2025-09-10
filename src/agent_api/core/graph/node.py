@@ -1,15 +1,13 @@
+import traceback
+
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from . import (
-    IntentClassification,
-    IntrospectionClassification,
-    create_intent_classifier_chain,
-    create_introspection_chain,
-    create_react_graph,
-)
+from .assist import create_intent_classifier_chain, create_introspection_chain
+from .type import IntentClassification, IntrospectionClassification
 
 
+# ---------- 通用相关 ----------
 async def chat_node(state, llm: BaseChatModel) -> dict:
     '''节点，对话。传入 LLM 并定义对话提示模板，整合为链，填充对话提示模板并调用 LLM 给出回复，返回 AIMessage 或 ToolMessage'''
     chat_prompt_template = ChatPromptTemplate.from_messages(
@@ -31,25 +29,33 @@ async def chat_node(state, llm: BaseChatModel) -> dict:
             'messages': state.messages,
         }
     )
-    return {'messages', response}
+    return {'messages': response}
+
+
+# ---------- 主图相关 ----------
+
+
+async def intent_classifier_entry_node(state) -> dict:
+    '''节点，意图分类器入口，意图路由器入口。'''
+    return {}
 
 
 async def intent_classifier_node(state, llm: BaseChatModel) -> IntentClassification:
     '''伪节点，意图分类器，意图路由器。传入 LLM，创建意图分类器链，填充 messages，返回意图类别'''
     try:
-        chain = create_intent_classifier_chain(llm)
-        return await chain.ainvoke({'messages': state.messages})
+        chain = await create_intent_classifier_chain(llm)
+        classification = await chain.ainvoke({'messages': state.messages})
+        return classification.intent
     except:
         return IntentClassification.REACT_GRAPH
 
 
-async def react_graph_adapter_node(state, chat_node: chat_node, llm: BaseChatModel, tools: list) -> dict:
+async def react_graph_adapter_node(state, react_graph) -> dict:
     '''节点，ReAct 图适配器。创建 ReAct 图，从主图状态适配 ReAct 图状态，运行 ReAct 图得到回复，返回到回复草稿'''
-    react_graph = create_react_graph(chat_node, llm, tools)
 
     # ！！！！！ 是否需要确保每次调用 ReAct 之前，显示设置图状态各项均为空，然后传入新的状态
 
-    response = await react_graph.ainvoke(
+    react_state = await react_graph.ainvoke(
         {
             'system_prompt': state.system_prompt,
             'user_name': state.user_name,
@@ -58,7 +64,7 @@ async def react_graph_adapter_node(state, chat_node: chat_node, llm: BaseChatMod
             'messages': state.messages,
         }
     )
-    return {'response_draft': response.content[-1]}
+    return {'response_draft': react_state.get('messages')[-1]}
 
 
 async def introspection_entry_node(state) -> dict:
@@ -69,15 +75,21 @@ async def introspection_entry_node(state) -> dict:
 async def introspection_node(state, llm: BaseChatModel) -> IntrospectionClassification:
     '''伪节点，反思。传入 LLM，创建反思链，填充 messages 和 response_draft，返回反思类别'''
     try:
-        chain = create_introspection_chain(llm)
-        return await chain.ainvoke({'message': state.messages, 'response_draft': state.response_draft})
+        chain = await create_introspection_chain(llm)
+        classification = await chain.ainvoke({'messages': state.messages, 'response_draft': state.response_draft})
+        return classification.introspection
     except:
-        IntrospectionClassification.AddFinalResponseNode
+        error = traceback.format_exc()
+        print('--------------------------------------------------')
+        print(error)
+        print('--------------------------------------------------')
+
+        return IntrospectionClassification.AddFinalResponseNode
 
 
 async def add_final_response_node(state) -> dict:
     '''添加最终回复。将回复草稿中的内容添加到 MainState 的 messages 中'''
-    final_response = state.get('response_draft')
+    final_response = state.response_draft
     return {'messages': [final_response]}
 
 

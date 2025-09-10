@@ -4,9 +4,9 @@ import aiohttp
 import numpy as np
 from sounddevice import OutputStream
 
-from ...utils import logger
+from ...utils import create_logger
 
-logger = logger(is_use_file_handler=True, log_path='GPT_SoVITS.log')
+logger = create_logger(is_use_file_handler=True, log_path='GPT_SoVITS.log')
 
 
 class GPT_SoVITS_TTS:

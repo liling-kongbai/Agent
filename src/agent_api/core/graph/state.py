@@ -16,7 +16,7 @@ class MainState(BaseModel):  # BaseModel 继承可创建数据模型
     # Annotated 类型可加元数据类型，在类型注解中添加额外元数据
     # list 列表类型，支持泛型语法，指定变量类型
     # add_messages 追加合并两个消息列表或通过 ID 更新现有消息
-    response_draft: AIMessage  # 回复草稿
+    response_draft: AIMessage | None  # 回复草稿
 
 
 class ReActState(BaseModel):
