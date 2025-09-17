@@ -10,8 +10,9 @@ from langchain_ollama import ChatOllama
 from .type import Intent, IntentClassification, Introspection, IntrospectionClassification
 
 
+# ---------- 主图相关 ----------
 async def create_intent_classifier_chain(llm: BaseChatModel) -> RunnableSequence:
-    '''辅助，创建意图分类器链。传入 LLM，创建 Pydantic 输出解析和对话提示模板，引导 LLM 进行意图分类，整合为链并返回'''
+    '''辅助，创建意图分类器链，创建意图路由器链。传入 LLM，创建 Pydantic 输出解析和对话提示模板，引导 LLM 进行意图分类，整合为链并返回'''
     parser = PydanticOutputParser(
         pydantic_object=Intent
     )  # PydanticOutputParser() 将 LLM 的非结构化输出解析为结构化的 Pydantic 对象
@@ -27,15 +28,12 @@ async def create_intent_classifier_chain(llm: BaseChatModel) -> RunnableSequence
         },
         role='system',
     )  # get_format_instructions() 生成系统提示词，指导 LLM 按照指定的 Pydantic 对象输出 JSON 数据
-
-    # ！！！！！ 注意输出可能是 JSON 数据，可能需要提取为 str
-
     prompt_template = ChatPromptTemplate.from_messages([message_prompt_template])
     return prompt_template | llm | parser
 
 
-async def create_introspection_chain(llm: BaseChatModel) -> RunnableSequence:
-    '''辅助，创建反思链'''
+async def create_introspection_classifier_chain(llm: BaseChatModel) -> RunnableSequence:
+    '''辅助，创建反思分类器链，创建反思路由器链。传入 LLM，创建 Pydantic 输出解析和对话提示模板，引导 LLM 进行反思分类，整合为链并返回'''
     parser = PydanticOutputParser(pydantic_object=Introspection)
     message_prompt_template = ChatMessagePromptTemplate.from_template(
         '''
@@ -58,6 +56,7 @@ async def create_introspection_chain(llm: BaseChatModel) -> RunnableSequence:
     return prompt_template | llm | parser
 
 
+# ---------- LLM 相关 ----------
 async def connect_ollama_llm(model, base_url, temperature, num_predict):
     '''连接 Ollama 平台的 LLM'''
     params = {'model': model}

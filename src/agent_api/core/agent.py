@@ -4,11 +4,17 @@ from datetime import datetime
 import aiosqlite
 from langchain_core.messages.human import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_ollama import OllamaEmbeddings
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.store.postgres import PostgresStore
+from langgraph.store.postgres.base import PostgresIndexConfig
+from psycopg import Connection
+from psycopg_pool import ConnectionPool
 
 from ..utils import create_logger
 
 logger = create_logger(is_use_file_handler=True, log_path='agent.log')
+
 
 from .graph import create_main_graph_builder
 from .graph.assist import connect_deepseek_llm, connect_ollama_llm
@@ -17,38 +23,38 @@ from .tts import GPT_SoVITS_TTS
 
 
 class Agent:
+    '''智能体。'''
+
     def __init__(self, config):
         super().__init__()
         self._config = config
 
         # 状态相关
-        self._graph_ready = False
+        self._graph_readied = False
         self._llm_activated = False
 
         self._run_config = None
         self.current_thread_id = None
 
-        # 存储或记忆相关
+        # 存储相关
         self.db_connection = None
         self.async_sqlite_saver = None  # 异步 SQLite 文件检查点保存器
 
-        # self._episode_memory_manager = None
-        # self._episode_memory_reflection_executor = None
+        # 图相关
+        self.graph = None
 
         # LLM 相关
         self._llm = None
         self._llm_with_tools = self._llm
 
+        self._last_llm_platform = 'ollama'  # 默认初始值为 ollama
+        self._last_llm = 'qwen2.5:3b'  # 默认初始值为 qwen2.5:3b
+
         self._llm_connectors = {'ollama': connect_ollama_llm, 'deepseek': connect_deepseek_llm}
-        self._last_llm_platform = 'ollama'  # 初始默认值为 ollama
-        self._last_llm = 'qwen2.5:3b'  # 初始默认值为 qwen2.5:3b
 
         # MCP 相关
         self._multi_server_mcp_client = None
         self._mcp_tools = []
-
-        # 图相关
-        self.graph = None
 
         # GPT_SoVITS 相关
         self._gpt_sovits = None
@@ -56,12 +62,16 @@ class Agent:
         # 监听相关
         self._listeners = []  # 监听者
 
-    # ---------- 初始化 ----------
+        # 记忆相关
+        # self._episode_memory_manager = None
+        # self._episode_memory_reflection_executor = None
+
+    # ---------- 启动 ----------
     async def init_graph(self):
-        '''初始化图。'''
+        '''初始化图。初始化数据库，初始化异步 SQLite 文件检查点保存器，编译图'''
         logger.debug('<init_graph> 初始化图')
         try:
-            logger.debug('<init_graph> 初始化数据库')
+            logger.debug('<init_graph> 初始化异步 SQLite 文件检查点保存数据库')
             self.db_connection = await aiosqlite.connect(r'C:\Users\kongbai\study\project\AgentDevelop\memory.db')
             await self.db_connection.execute(
                 '''
@@ -78,6 +88,41 @@ class Agent:
             logger.debug('<init_graph> 初始化异步 SQLite 文件检查点保存器')
             self.async_sqlite_saver = AsyncSqliteSaver(conn=self.db_connection)
 
+            # ------------------------------
+            # ------------------------------
+            # ------------------------------
+            logger.debug('<init_graph> 初始化 postgres 数据库')
+            # ---------- postgres 数据库配置 ----------
+            postgres_connection_string = 'postgresql://postgres:root@localhost:5432/test'  # 数据库连接字符串
+            postgres_index_config: PostgresIndexConfig = {
+                'dims': 1024,  # 向量维度，嵌入模型输出向量维度
+                'embed': OllamaEmbeddings(model='bge-m3:latest'),  # 嵌入模型
+                'fields': [
+                    'content.observation',
+                    'content.thought',
+                    'content.action',
+                    'content.result',
+                ],  # 文本内容提取规则，提取 content 对象下的字段并拼接用于生成向量
+                'ann_index_config': {
+                    'kind': 'hnsw',
+                    'vector_type': 'vector',
+                },  # 近似最近邻索引配置，近似最近邻检索，索引类型，向量类型
+                'distance_type': 'cosine',  # 距离类型，距离度量算法，'l2', 'inner_product', 'cosine'
+            }  # 数据库向量索引配置
+
+            # ---------- 连接postgres 数据库并初始化  ----------
+            with Connection.connect(postgres_connection_string, autocommit=True) as connection:
+                temporary_store = PostgresStore(connection, index=postgres_index_config)
+                temporary_store.setup()
+            # ---------- 构建 postgres 数据库连接池 ----------
+            postgres_connection_pool = ConnectionPool(postgres_connection_string, min_size=1, max_size=2)
+            # ---------- 构建 postgres 数据库 ----------
+            postgres_store = PostgresStore(postgres_connection_pool, index=postgres_index_config)
+
+            # ------------------------------
+            # ------------------------------
+            # ------------------------------
+
             logger.debug('<init_graph> 编译图')
             await self._compile_graph()
         except:
@@ -89,62 +134,60 @@ class Agent:
         '''编译图。'''
         logger.debug('<_compile_graph> 编译图')
         if self.async_sqlite_saver:
-            graph_builder = await create_main_graph_builder(self._llm_with_tools, chat_node, self._mcp_tools)
+            graph_builder = await create_main_graph_builder(chat_node, self._llm_with_tools, self._mcp_tools)
             self._graph = graph_builder.compile(checkpointer=self.async_sqlite_saver)
 
             self._graph_ready = True
-            await self._broadcast('graph_ready_monitor')
-
-            # ！！！！！ 图准备信号好像没有什么用处了？
+            await self._broadcast('graph_ready_signal_monitor')  # ！！！！！图准备信号好像没有什么用了？
 
             await self._input_ready_check()
         else:
-            logger.error('<_compile_graph> 异步 SQLite 文件检查点保存器不存在，未编译图！！！')
+            logger.error('<_compile_graph> 异步 SQLite 文件检查点保存器不存在，未编译图！！！！！')
 
     # ---------- 关闭 ----------
     async def clean(self):
         '''清理。执行所有必要的异步清理操作'''
-        logger.debug('<_clean> 清理')
+        logger.debug('<clean> 清理')
 
         if self._gpt_sovits:
-            logger.info('<cleanup> [诊断] 准备停止 GPT_SoVITS...')
+            logger.debug('<clean> 停止 GPT_SoVITS')
             await self._gpt_sovits.stop()
             self._gpt_sovits = None
-            logger.info('<cleanup> [诊断] GPT_SoVITS 已停止。')
+            logger.debug('<clean> GPT_SoVITS 已停止')
 
         if self._mcp_tools:
             self._mcp_tools = []
             if self._multi_server_mcp_client:
-                logger.info('<cleanup> [诊断] 准备关闭 MCP 客户端...')
+                logger.debug('<clean> 清理多服务器 MCP 客户端')
                 self._multi_server_mcp_client = None
-                logger.info('<cleanup> [诊断] MCP 客户端已关闭。')
+                logger.debug('<clean> 多服务器 MCP 客户端已清理')
 
         if self._llm_activated:
+            logger.debug('<clean> 清理 LLM')
             self._llm_activated = False
-            await self._broadcast('input_unready_monitor')
+            await self._broadcast('input_unready_signal_monitor')
 
             self._llm_with_tools = None
             self._llm = None
+            logger.debug('<clean> LLM 已清理')
 
         if self._graph_ready:
-            logger.debug('<_clean> 清理图，清理异步 SQLite 文件检查点保存器，关闭并清理数据库')
+            logger.debug('<clean> 清理图，清理异步 SQLite 文件检查点保存器，关闭并清理数据库')
             if self.async_sqlite_saver:
                 self.graph = None
-                logger.debug('<cleanup> 清理异步 SQLite 文件检查点保存器')
                 self.async_sqlite_saver = None
                 if self.db_connection:
-                    logger.info('<cleanup> [诊断] 准备关闭数据库连接...')
                     await self.db_connection.close()
                     self.db_connection = None
-                    logger.info('<cleanup> [诊断] 数据库连接已关闭。')
-        logger.debug('<cleanup> Agent 资源清理完毕')
+                    logger.debug('<clean> 图，异步 SQLite 文件检查点保存器，数据库已关闭并清理')
+        logger.debug('<clean> 清理完毕')
 
     # ---------- 激活 LLM ----------
     async def activate_llm(self, platform, model):
         '''激活 LLM。连接 LLM'''
         if self._llm_activated:
             self._llm_activated = False
-            await self._broadcast('input_unready_monitor')
+            await self._broadcast('input_unready_signal_monitor')
 
         self._llm_with_tools = None
         self._llm = None
@@ -172,7 +215,6 @@ class Agent:
     async def activate_mcp_client(self, activation):
         '''激活 MCP 客户端。连接多服务器 MCP 客户端并加载工具'''
         if activation and not self._multi_server_mcp_client:
-            logger.debug('<_activate_mcp_client> 激活 MCP 客户端')
             logger.debug('<_activate_mcp_client> 连接多服务器 MCP 客户端')
             self._multi_server_mcp_client = MultiServerMCPClient(
                 {
@@ -197,7 +239,7 @@ class Agent:
         await self._update_tools_bind()
 
     # ---------- 激活 GPT_SoVITS ----------
-    async def activate_gpt_sovits(self, activation):
+    async def activate_gpt_sovits(self, activation):  # ！！！！！GPT_SoVITS 没有写流式 TTS，还能改造，还能更快
         '''激活 GPT_SoVITS。连接 GPT_SoVITS'''
         if activation and not self._gpt_sovits:
             self._gpt_sovits = GPT_SoVITS_TTS(self._config)
@@ -205,8 +247,6 @@ class Agent:
         elif not activation and self._gpt_sovits:
             await self._gpt_sovits.stop()
             self._gpt_sovits = None
-
-    # ！！！！！GPT_SoVITS 没有写流式 TTS，还能改造，还能更快
 
     # ---------- 运行 ----------
     async def user_message_input(self, input, callbacks):
@@ -234,20 +274,17 @@ class Agent:
                 for node_name, node_output in event.items():
                     if node_name == 'add_final_response_node':
                         final_content = node_output['messages'][0].content
-                        await callbacks['on_ai_message_chunk'](final_content)
-                        await callbacks['on_ai_message_chunk_finish']()
+                        await callbacks['ai_message_chunk_signal'](final_content)
+                        await callbacks['ai_message_chunk_finish_signal']()
                     else:
                         node_message = f'-------------------- {node_name} --------------------\n'
                         if node_output is not None:
                             node_message = node_output.get('messages', [])
                             for i in node_output:
-                                node_message += f'{type(i).__name__}({i!r})\n'
-
-                            # ！！！！！这句话记得弄懂
-
+                                node_message += f'{type(i).__name__}({i!r})\n'  # ！！！！！这句话记得弄懂
                         else:
                             node_message = node_message + '---------- None ----------'
-                        await callbacks['on_graph_state_update'](node_message)
+                        await callbacks['graph_state_update_signal'](node_message)
                         logger.debug(node_message)
 
             # 对话历史相关
@@ -261,14 +298,14 @@ class Agent:
                 # ！！！！！这里注意占位符有些用处，注意学习
 
                 await self.db_connection.commit()
-                await self.update_chat_history_list()
+                await self.update_chat_history()
             else:  # 旧对话
                 await self.db_connection.execute(
                     'UPDATE ChatHistory SET updated_at = ? WHERE thread_id = ?',
                     (datetime.now(), self.current_thread_id),
                 )
                 await self.db_connection.commit()
-                await self.update_chat_history_list()  # ！！！！！这里也是非常的频繁，应该避免
+                await self.update_chat_history()  # ！！！！！这里也是非常的频繁，应该避免
 
                 # ！！！！！如果每一次对话都更新最后修改时间是不是太频繁了，应该可以改成最后一次对话之前更改，比如在新建对话或更换对话之前更改
 
@@ -280,14 +317,14 @@ class Agent:
             await self._broadcast('input_ready_monitor')
 
     # ---------- 对话历史 ----------
-    async def update_chat_history_list(self):
+    async def update_chat_history(self):
         '''更新对话历史列表。'''
         async with self.db_connection.execute(
             'SELECT thread_id, title, updated_at FROM ChatHistory ORDER BY updated_at DESC'
         ) as cursor:
             rows = (
                 await cursor.fetchall()
-            )  # fetchall() 把查询得到的所有剩余行一次性取回来并返回列表，列表里每个元素是一条 row （行
+            )  # fetchall() 把查询得到的所有剩余行一次性取回来并返回列表，列表里每个元素是一条 row （行）
             # 从 ChatHistory 表中取出所有 thread_id，title，updated_at，根据 update_at 按照降序排列
             history_list = [{'thread_id': row[0], 'title': row[1]} for row in rows]
             await self._broadcast('update_chat_history_list_signal_monitor', history_list)
@@ -316,10 +353,10 @@ class Agent:
 
     # ---------- 辅助 ----------
     async def _input_ready_check(self):
-        '''输入准备检查。检查图是否准备，LLM 是否激活，并广播输入准备信号'''
+        '''输入准备检查。检查图是否准备，LLM 是否激活，并广播输入准备信号，'''
         logger.debug('<_input_ready_check> 输入准备检查')
         if self._graph_ready and self._llm_activated:
-            await self._broadcast('input_ready_monitor')
+            await self._broadcast('input_ready_signal_monitor')
 
     async def _update_tools_bind(self):
         '''更新工具绑定。'''
@@ -334,19 +371,17 @@ class Agent:
 
     # ---------- 监听与广播 ----------
     def add_listener(self, listener):
-        '''添加监听者'''
+        '''添加监听者。'''
         if listener and listener not in self._listeners:
             self._listeners.append(listener)
 
-    # ！！！！！添加谁进来？还没有添加！
-
     def remove_listener(self, listener):
-        '''移除监听者'''
+        '''移除监听者。'''
         if listener and listener in self._listeners:
             self._listeners.remove(listener)
 
     async def _broadcast(self, signal_name: str, *args, **kwargs):
-        '''广播。获取监听者的方法并调用'''
+        '''广播。获取监听者的监听方法并调用'''
         for listener in self._listeners:
             if hasattr(listener, signal_name):  # hasattr() 判断对象是否包含指定的属性或方法
                 method = getattr(listener, signal_name)  # getattr() 动态获取对象的属性或方法，支持默认值

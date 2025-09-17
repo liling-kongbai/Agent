@@ -5,7 +5,7 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel
 
 
-class MainState(BaseModel):  # BaseModel 继承可创建数据模型
+class MainState(BaseModel):
     '''图状态，主图状态，共享数据结构'''
 
     system_prompt: str  # 系统提示词

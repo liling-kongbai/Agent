@@ -77,21 +77,21 @@ class MainWindow(QWidget):
 
     def _signal_connect_slot(self):
         '''信号连接槽'''
-        self.mcp_host.occur_error.connect(self.mcp_host_occur_error)
-        self.mcp_host.input_ready.connect(self.backend_ready)
-        self.mcp_host.graph_ready.connect(self.mcp_host.update_chat_history_list)
-        self.mcp_host.input_unready.connect(self.backend_unready)
-        self.mcp_host.ai_message_chunk.connect(self.add_ai_message_bubble)
-        self.mcp_host.ai_message_chunk_finish.connect(self.ai_message_chunk_finish)
-        self.mcp_host.graph_state_update.connect(self.panel.add_graph_state)
+        self.mcp_host.occur_error_signal.connect(self.mcp_host_occur_error)
+        self.mcp_host.input_ready_signal.connect(self.backend_ready)
+        self.mcp_host.graph_ready_signal.connect(self.mcp_host.update_chat_history)
+        self.mcp_host.input_unready_signal.connect(self.backend_unready)
+        self.mcp_host.ai_message_chunk_signal.connect(self.add_ai_message_bubble)
+        self.mcp_host.ai_message_chunk_finish_signal.connect(self.ai_message_chunk_finish)
+        self.mcp_host.graph_state_update_signal.connect(self.panel.add_graph_state)
 
         self.mcp_host.load_chat_signal.connect(self.load_chat_history)
-        self.mcp_host.update_chat_history_list_signal.connect(self.sidebar.update_chat_history_list)
+        self.mcp_host.update_chat_history_signal.connect(self.sidebar.update_chat_history_list)
 
         self.thread.started.connect(self.mcp_host.start)
         self.thread.started.connect(self.new_chat)
 
-        # self.mcp_host.agent_finish.connect(self.mcp_host_finished)
+        self.mcp_host.agent_finish_signal.connect(self._on_agent_finished)
 
         self.activity_bar.transmit_changed_button_index.connect(self.update_button_state_and_switch_sidebar)
 
@@ -136,14 +136,6 @@ class MainWindow(QWidget):
         '''AI Message Chunk 结束'''
         self.current_ai_message_bubble = None
         self.main_content.set_input_text_edit_enabled_and_focus(True)
-
-    @Slot()
-    def mcp_host_finished(self):
-        '''MCP 主机结束'''
-        if self.thread and self.thread.isRunning():
-            self.thread.quit()
-            self.thread.wait()
-        self.close()
 
     @Slot(int)
     def update_button_state_and_switch_sidebar(self, index):
@@ -233,32 +225,69 @@ class MainWindow(QWidget):
 
         QTimer.singleShot(0, initial_sync)  # singleShot() 单次延时执行
 
-    def closeEvent(self, event):
-        if self._shutting_down:
-            # if self.thread:
-            #     self.thread.wait()
-            # if hasattr(self, 'mcp_host'):
-            #     self.mcp_host = None
-            # if hasattr(self, 'thread'):
-            #     self.thread = None
-            event.ignore()
-            return
+    # def closeEvent(self, event):
 
-        if not self.thread and not self.thread.isRunning():
+    #     # if self._shutting_down:
+    #     #     event.ignore()
+    #     #     return
+
+    #     if not self.thread.isRunning():
+    #         event.accept()
+    #         return
+
+    #     self.setEnabled(False)
+    #     # self._shutting_down = True
+    #     self.mcp_host.close()
+    #     event.ignore()
+
+    @Slot()
+    def _on_agent_finished(self):
+        '''当后端代理完成所有清理工作后调用此槽'''
+        if self.thread and self.thread.isRunning():
+            self.thread.quit()  # 请求线程事件循环退出
+            self.thread.wait()  # 阻塞等待，直到线程完全终止
+
+        # 此时，所有自定义的线程和异步任务都已干净地结束
+        # 现在可以安全地再次调用 close() 来关闭窗口了
+        self.close()
+
+    def closeEvent(self, event):
+        # 如果已经处于关闭流程中，说明是 _on_agent_finished 回调触发的
+        # 此时后端和线程已清理完毕，直接接受事件，关闭窗口
+        if self._shutting_down:
             event.accept()
             return
 
-        self.setEnabled(False)
-        self._shutting_down = True
-        self.mcp_host.close()
-
-        finished = self.thread.wait(5000)
-        if finished:
-            print('---------- 后台线程终止 ----------')
+        # 如果线程正在运行，启动优雅关闭流程
+        if self.thread and self.thread.isRunning():
+            # 1. 禁用窗口，防止用户再次操作
+            self.setEnabled(False)
+            # 2. 设置标志位
+            self._shutting_down = True
+            # 3. 通知后端开始关闭
+            self.mcp_host.close()
+            # 4. 忽略当前关闭事件，等待后端通过信号通知我们它已完成
+            event.ignore()
         else:
-            print('---------- ！！！！！ 等待后台超时 ！！！！！ 可能强制终止 ！！！！！ ----------')
+            # 如果线程本来就没在运行，直接接受事件关闭即可
+            event.accept()
 
-        # event.accept()
+    # def closeEvent(self, event):
+    #     if self._shutting_down:
+    #         if self.thread and self.thread.isRunning():
+    #             self.thread.quit()
+    #             self.thread.wait()
+    #         event.accept()
+    #         return
+
+    #     if self.thread and self.thread.isRunning():
+    #         self.setEnabled(False)
+    #         self._shutting_down = True
+
+    #         self.mcp_host.close()
+    #         event.ignore()
+    #     else:
+    #         event.accept()
 
     @Slot(list)
     def load_chat_history(self, history):
