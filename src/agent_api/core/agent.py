@@ -8,6 +8,7 @@ from langchain_ollama import OllamaEmbeddings
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.postgres import PostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
+from langmem import create_memory_store_manager
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
 
@@ -17,8 +18,9 @@ logger = create_logger(is_use_file_handler=True, log_path='agent.log')
 
 
 from .graph import create_main_graph_builder
-from .graph.assist import connect_deepseek_llm, connect_ollama_llm
+from .graph.assist.assist import connect_deepseek_llm, connect_ollama_llm
 from .graph.node import chat_node
+from .graph.type import EpisodeMemory
 from .tts import GPT_SoVITS_TTS
 
 
@@ -36,9 +38,21 @@ class Agent:
         self._run_config = None
         self.current_thread_id = None
 
+        langgraph_user_id = 'user_test'
+        runnable_config = RunnableConfig(configurable={'langgraph_user_id': langgraph_user_id})  # Runnable 配置
+
         # 存储相关
         self.db_connection = None
         self.async_sqlite_saver = None  # 异步 SQLite 文件检查点保存器
+
+        self._postgres_connection_string = (
+            'postgresql://postgres:root@localhost:5432/test'  # postgres 数据库连接字符串
+        )
+        self._postgres_index_config = None  # postgres 数据库向量索引配置
+        self._postgres_connection_pool = None  # postgres 数据库连接池
+        self._postgres_store = None  # postgres 数据库
+
+        self._episode_memory_manager = None
 
         # 图相关
         self.graph = None
@@ -61,10 +75,6 @@ class Agent:
 
         # 监听相关
         self._listeners = []  # 监听者
-
-        # 记忆相关
-        # self._episode_memory_manager = None
-        # self._episode_memory_reflection_executor = None
 
     # ---------- 启动 ----------
     async def init_graph(self):
@@ -91,10 +101,8 @@ class Agent:
             # ------------------------------
             # ------------------------------
             # ------------------------------
-            logger.debug('<init_graph> 初始化 postgres 数据库')
-            # ---------- postgres 数据库配置 ----------
-            postgres_connection_string = 'postgresql://postgres:root@localhost:5432/test'  # 数据库连接字符串
-            postgres_index_config: PostgresIndexConfig = {
+            logger.debug('<init_graph> 初始化 postgres 数据库向量索引配置')
+            self._postgres_index_config: PostgresIndexConfig = {
                 'dims': 1024,  # 向量维度，嵌入模型输出向量维度
                 'embed': OllamaEmbeddings(model='bge-m3:latest'),  # 嵌入模型
                 'fields': [
@@ -108,16 +116,17 @@ class Agent:
                     'vector_type': 'vector',
                 },  # 近似最近邻索引配置，近似最近邻检索，索引类型，向量类型
                 'distance_type': 'cosine',  # 距离类型，距离度量算法，'l2', 'inner_product', 'cosine'
-            }  # 数据库向量索引配置
-
-            # ---------- 连接postgres 数据库并初始化  ----------
-            with Connection.connect(postgres_connection_string, autocommit=True) as connection:
-                temporary_store = PostgresStore(connection, index=postgres_index_config)
+            }
+            logger.debug('<init_graph> 初始化 postgres 数据库')
+            with Connection.connect(self._postgres_connection_string, autocommit=True) as connection:
+                temporary_store = PostgresStore(connection, index=self._postgres_index_config)
                 temporary_store.setup()
-            # ---------- 构建 postgres 数据库连接池 ----------
-            postgres_connection_pool = ConnectionPool(postgres_connection_string, min_size=1, max_size=2)
-            # ---------- 构建 postgres 数据库 ----------
-            postgres_store = PostgresStore(postgres_connection_pool, index=postgres_index_config)
+
+                PersistenceExecutor.setup(connection)
+            logger.debug('<init_graph> 初始化 postgres 数据库连接池')
+            self._postgres_connection_pool = ConnectionPool(self._postgres_connection_string, min_size=1, max_size=2)
+            logger.debug('<init_graph> 创建 postgres 数据库')
+            self._postgres_store = PostgresStore(self._postgres_connection_pool, index=self._postgres_index_config)
 
             # ------------------------------
             # ------------------------------
@@ -184,7 +193,7 @@ class Agent:
 
     # ---------- 激活 LLM ----------
     async def activate_llm(self, platform, model):
-        '''激活 LLM。连接 LLM'''
+        '''激活 LLM。连接 LLM 和 情景记忆仓库管理员'''
         if self._llm_activated:
             self._llm_activated = False
             await self._broadcast('input_unready_signal_monitor')
@@ -200,12 +209,23 @@ class Agent:
         try:
             if platform in list(self._llm_connectors.keys()):
                 self._llm = await self._llm_connectors[platform](model, None, None, None)
+
+                manager = create_memory_store_manager(
+                    self._llm, schemas=[EpisodeMemory], namespace=('memories', 'user_test'), store=postgres_store
+                )
+
                 await self._update_tools_bind()
 
                 self._llm_activated = True
                 await self._input_ready_check()
+
+                self._episode_memory_manager = create_memory_store_manager(
+                    self._llm, schemas=[EpisodeMemory], store=self._postgres_store
+                )  # 构建情景记忆仓库管理员
+
                 self._last_llm_platform = platform
                 self._last_llm = model
+
         except:
             error = traceback.format_exc()
             await self._broadcast('occur_error_monitor', '<activate_llm>\n' + error)

@@ -7,7 +7,7 @@ from langchain_core.runnables.base import RunnableSequence
 from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import ChatOllama
 
-from .type import Intent, IntentClassification, Introspection, IntrospectionClassification
+from ..type import Intent, IntentClassification, Introspection, IntrospectionClassification
 
 
 # ---------- 主图相关 ----------

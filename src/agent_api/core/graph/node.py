@@ -1,7 +1,7 @@
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-from .assist import create_intent_classifier_chain, create_introspection_classifier_chain
+from .assist.assist import create_intent_classifier_chain, create_introspection_classifier_chain
 from .type import IntentClassification, IntrospectionClassification
 
 
