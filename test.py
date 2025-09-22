@@ -59,7 +59,7 @@ executor = PersistenceExecutor(manager, postgres_store)
 langgraph_user_id = 'user_test'
 runnable_config = RunnableConfig(
     configurable={'langgraph_user_id': langgraph_user_id, 'thread_id': 'duihuaceshi111222333'}
-)  # Runnable 配置s
+)  # Runnable 配置
 
 old_messages = [
     {'role': 'user', 'content': '什么是二叉树？我平常做家谱，这能帮到我吗？'},

@@ -213,15 +213,12 @@ class Agent:
                 manager = create_memory_store_manager(
                     self._llm, schemas=[EpisodeMemory], namespace=('memories', 'user_test'), store=postgres_store
                 )
+                executor = PersistenceExecutor(manager, postgres_store)
 
                 await self._update_tools_bind()
 
                 self._llm_activated = True
                 await self._input_ready_check()
-
-                self._episode_memory_manager = create_memory_store_manager(
-                    self._llm, schemas=[EpisodeMemory], store=self._postgres_store
-                )  # 构建情景记忆仓库管理员
 
                 self._last_llm_platform = platform
                 self._last_llm = model
